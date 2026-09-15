@@ -52,7 +52,10 @@ struct MainWindowView: View {
     @Bindable var state: AppState
 
     private var selection: Binding<String?> {
-        Binding(get: { state.selectedEntry?.id }, set: { state.selectedAccountId = $0 })
+        Binding(
+            get: { state.showsOverview ? AppState.overviewSelectionId : state.selectedEntry?.id },
+            set: { state.selectedAccountId = $0 }
+        )
     }
 
     var body: some View {
@@ -60,7 +63,9 @@ struct MainWindowView: View {
             sidebar
                 .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 360)
         } detail: {
-            if let entry = state.selectedEntry {
+            if state.showsOverview {
+                OverviewView(state: state)
+            } else if let entry = state.selectedEntry {
                 AccountDetailView(state: state, entry: entry)
                     .id(entry.id)
             } else {
@@ -77,6 +82,9 @@ struct MainWindowView: View {
     private var sidebar: some View {
         VStack(spacing: 0) {
             List(selection: selection) {
+                if state.entries.count >= 2 {
+                    OverviewSidebarRow(pool: state.combinedPace).tag(AppState.overviewSelectionId)
+                }
                 ForEach(state.entries) { entry in
                     SidebarRow(entry: entry).tag(entry.id)
                 }
@@ -129,6 +137,30 @@ struct MainWindowView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// 侧边栏顶部的"全部账号"行：合池已用与节奏差距一眼可见。
+struct OverviewSidebarRow: View {
+    let pool: CombinedPace?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: "square.stack.3d.up").foregroundStyle(.secondary)
+                Text("全部账号").font(.callout.weight(.semibold))
+            }
+            HStack(spacing: 6) {
+                // 选中时底色是强调色，这里不用红绿着色，否则看不清。
+                if let pool {
+                    Text("合计 \(Int(pool.usedPercent.rounded()))% · \(PaceFormat.gapText(pool.gapPercent, verdict: pool.verdict))")
+                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                } else {
+                    Text("额度加载中…").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(.vertical, 3)
     }
 }
 
@@ -390,12 +422,6 @@ struct AccountDetailView: View {
     private func section<Content: View>(
         _ title: String, systemImage: String, @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: systemImage).font(.subheadline.weight(.semibold))
-            content()
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.06)))
+        DetailSection(title, systemImage: systemImage, content: content)
     }
 }

@@ -13,6 +13,11 @@ struct MenuView: View {
                 emptyHint
             } else {
                 VStack(spacing: 6) {
+                    if let pool = state.combinedPace, pool.accountCount >= 2 {
+                        GlobalPaceRow(pool: pool) {
+                            MainWindowController.shared.show(state: state, selecting: AppState.overviewSelectionId)
+                        }
+                    }
                     ForEach(state.entries) { entry in
                         CompactAccountRow(entry: entry, isBusy: state.isBusy) {
                             state.switchTo(accountId: entry.id)
@@ -154,5 +159,47 @@ struct CompactAccountRow: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(count: 2, perform: onOpenDetail)
+    }
+}
+
+/// 菜单栏里的合计一行：所有账号合池后的已用与计划基准线、每天可用量或耗尽预警；点击打开总览页。
+struct GlobalPaceRow: View {
+    let pool: CombinedPace
+    let onOpen: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("全部账号合计").font(.system(.callout, weight: .semibold))
+                Text("\(pool.accountCount) 个").font(.caption2).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Text(PaceFormat.gapText(pool.gapPercent, verdict: pool.verdict))
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(PaceFormat.gapColor(pool.verdict))
+            }
+            WindowRow(
+                window: UsageWindow(usedPercent: pool.usedPercent, windowSeconds: nil, resetAt: nil),
+                baselinePercent: pool.plannedPercent, compact: true, label: "合计已用"
+            )
+            VStack(alignment: .leading, spacing: 3) {
+                if let exhaustion = pool.projectedExhaustionAt {
+                    Label(
+                        "按合计速度预计 \(ResetFormatter.relative(exhaustion).replacingOccurrences(of: "重置", with: "耗尽"))，早于最早的重置",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .foregroundStyle(.red)
+                } else {
+                    Label(String(format: "每天合计 ≤ %.1f%%", pool.sustainablePercentPerDay), systemImage: "gauge.with.needle")
+                }
+                Label("最早 \(ResetFormatter.relative(pool.nextReset.pace.resetAt))：\(pool.nextReset.label)", systemImage: "clock")
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
+        .help("打开总览页：合计节奏、逐账号对比、重置时间线")
     }
 }

@@ -76,6 +76,18 @@ final class AppState {
 
     var activeEntry: AccountEntry? { entries.first(where: \.isActive) }
 
+    /// 详情窗口侧边栏"全部账号"总览页的选中标识，与真实 account_id 不会冲突。
+    nonisolated static let overviewSelectionId = "__overview__"
+    var showsOverview: Bool { selectedAccountId == Self.overviewSelectionId }
+
+    /// 全局节奏：所有拿到周节奏的账号合成一个池子；需重新登录或额度未加载的账号计入 excludedCount。
+    var combinedPace: CombinedPace? {
+        let members = entries.compactMap { entry in
+            entry.pace.map { CombinedPace.Member(accountId: entry.id, label: entry.email, pace: $0) }
+        }
+        return CombinedPace(members: members, excludedCount: entries.count - members.count)
+    }
+
     var selectedEntry: AccountEntry? {
         entries.first(where: { $0.id == selectedAccountId }) ?? activeEntry ?? entries.first
     }

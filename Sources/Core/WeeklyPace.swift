@@ -26,6 +26,7 @@ public struct WeeklyPace: Equatable {
     public let gapPercent: Double
     public let remainingPercent: Double
     public let remainingSeconds: TimeInterval
+    public let resetAt: Date
     /// 最近速度（百分点/小时），采样不足为 nil。
     public let recentRatePerHour: Double?
     /// 按最近速度，到重置时预计会用到的百分比（可超过 100）。
@@ -49,6 +50,7 @@ public struct WeeklyPace: Equatable {
         gapPercent = usedPercent - plannedPercent
         remainingPercent = max(100 - usedPercent, 0)
         remainingSeconds = remaining
+        self.resetAt = resetAt
         sustainablePercentPerDay = remaining > 0 ? remainingPercent / (remaining / 86_400) : 0
 
         // 只用同一窗口、最近 lookback 内的采样；首尾跨度太短时速度噪声太大，放弃预测。

@@ -287,6 +287,69 @@ final class WeeklyPaceTests: XCTestCase {
     }
 }
 
+final class CombinedPaceTests: XCTestCase {
+    // A：7 天窗已过 2 天、用了 40%（计划 28.6%，5 天后重置）；B：7 天窗已过 5 天、用了 20%（计划 71.4%，2 天后重置）。
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    var a: UsageWindow { UsageWindow(usedPercent: 40, windowSeconds: 604_800, resetAt: now.addingTimeInterval(5 * 86_400)) }
+    var b: UsageWindow { UsageWindow(usedPercent: 20, windowSeconds: 604_800, resetAt: now.addingTimeInterval(2 * 86_400)) }
+
+    func members(samplesA: [UsageSample] = []) throws -> [CombinedPace.Member] {
+        [
+            .init(accountId: "A", label: "a@x", pace: try XCTUnwrap(WeeklyPace(window: a, samples: samplesA, now: now))),
+            .init(accountId: "B", label: "b@x", pace: try XCTUnwrap(WeeklyPace(window: b, samples: [], now: now))),
+        ]
+    }
+
+    func testPoolsAccountsEquallyAndOrdersByReset() throws {
+        let pool = try XCTUnwrap(CombinedPace(members: try members(), excludedCount: 1, now: now))
+        XCTAssertEqual(pool.members.map(\.accountId), ["B", "A"], "按重置时间从早到晚")
+        XCTAssertEqual(pool.nextReset.accountId, "B")
+        XCTAssertEqual(pool.excludedCount, 1)
+        XCTAssertEqual(pool.usedPercent, 30, accuracy: 0.01)
+        XCTAssertEqual(pool.plannedPercent, 50, accuracy: 0.01)
+        XCTAssertEqual(pool.verdict, .behind)
+        XCTAssertEqual(pool.remainingPercent, 70, accuracy: 0.01)
+        // A 每天 12%、B 每天 40% 才各自刚好撑到重置；池子口径是 (12 + 40) / 2
+        XCTAssertEqual(pool.sustainablePercentPerDay, 26, accuracy: 0.01)
+        XCTAssertNil(pool.recentRatePerHour)
+        XCTAssertEqual(pool.rateSampledCount, 0)
+        // B 先重置，回补 20 / 2；A 再重置，累计回补 (20 + 40) / 2
+        XCTAssertEqual(pool.remainingPercentAfterResets(through: pool.members[0]), 80, accuracy: 0.01)
+        XCTAssertEqual(pool.remainingPercentAfterResets(through: pool.members[1]), 100, accuracy: 0.01)
+    }
+
+    func testCombinedRateExhaustsPoolBeforeNextReset() throws {
+        let samples = [
+            UsageSample(at: now.addingTimeInterval(-3 * 3600), usedPercent: 25, resetAt: a.resetAt),
+            UsageSample(at: now, usedPercent: 40, resetAt: a.resetAt),
+        ]  // A 5%/时、B 无采样 → 池子 2.5%/时；剩 70% 只撑 28 小时，早于 B 48 小时后的重置
+        let pool = try XCTUnwrap(CombinedPace(members: try members(samplesA: samples), now: now))
+        XCTAssertEqual(try XCTUnwrap(pool.recentRatePerHour), 2.5, accuracy: 0.01)
+        XCTAssertEqual(pool.rateSampledCount, 1)
+        XCTAssertEqual(try XCTUnwrap(pool.projectedPercentAtNextReset), 150, accuracy: 0.01)
+        XCTAssertEqual(pool.projectedExhaustionAt, now.addingTimeInterval(28 * 3600), accuracy: 1)
+    }
+
+    func testSlowCombinedRateSurvivesToNextReset() throws {
+        let samples = [
+            UsageSample(at: now.addingTimeInterval(-6 * 3600), usedPercent: 39, resetAt: a.resetAt),
+            UsageSample(at: now, usedPercent: 40, resetAt: a.resetAt),
+        ]  // A 每 6 小时 1% → 池子每小时 1/12%，48 小时再用 4%
+        let pool = try XCTUnwrap(CombinedPace(members: try members(samplesA: samples), now: now))
+        XCTAssertNil(pool.projectedExhaustionAt)
+        XCTAssertEqual(try XCTUnwrap(pool.projectedPercentAtNextReset), 34, accuracy: 0.01)
+    }
+
+    func testSingleAccountMatchesItsOwnPaceAndEmptyIsNil() throws {
+        let pace = try XCTUnwrap(WeeklyPace(window: a, samples: [], now: now))
+        let pool = try XCTUnwrap(CombinedPace(members: [.init(accountId: "A", label: "a@x", pace: pace)], now: now))
+        XCTAssertEqual(pool.usedPercent, pace.usedPercent)
+        XCTAssertEqual(pool.plannedPercent, pace.plannedPercent)
+        XCTAssertEqual(pool.sustainablePercentPerDay, pace.sustainablePercentPerDay)
+        XCTAssertNil(CombinedPace(members: [], now: now))
+    }
+}
+
 final class ResetCreditTests: XCTestCase {
     let now = Date(timeIntervalSince1970: 1_789_500_000)
 
@@ -445,6 +508,12 @@ run(WeeklyPaceTests.self, [
     ("testSlowRateProjectsNoExhaustion", { try $0.testSlowRateProjectsNoExhaustion() }),
     ("testIgnoresSamplesFromPreviousWindowAndTooShortSpan", { try $0.testIgnoresSamplesFromPreviousWindowAndTooShortSpan() }),
     ("testHistoryStoreDedupesWithinMinuteAndPersists", { try $0.testHistoryStoreDedupesWithinMinuteAndPersists() }),
+])
+run(CombinedPaceTests.self, [
+    ("testPoolsAccountsEquallyAndOrdersByReset", { try $0.testPoolsAccountsEquallyAndOrdersByReset() }),
+    ("testCombinedRateExhaustsPoolBeforeNextReset", { try $0.testCombinedRateExhaustsPoolBeforeNextReset() }),
+    ("testSlowCombinedRateSurvivesToNextReset", { try $0.testSlowCombinedRateSurvivesToNextReset() }),
+    ("testSingleAccountMatchesItsOwnPaceAndEmptyIsNil", { try $0.testSingleAccountMatchesItsOwnPaceAndEmptyIsNil() }),
 ])
 run(UsageModelTests.self, [
     ("testWindowLabels", { try $0.testWindowLabels() }),

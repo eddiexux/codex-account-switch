@@ -52,13 +52,15 @@ struct WindowRow: View {
     let window: UsageWindow
     var baselinePercent: Double? = nil
     var compact = false
+    /// 覆盖窗口自带的标签，合池视图用它显示"合计"。
+    var label: String? = nil
 
     private var tint: Color { UsageTint.color(window.usedPercent) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(window.label).font(.caption).foregroundStyle(.secondary)
+                Text(label ?? window.label).font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if compact, let reset = window.resetAt {
                     Text(ResetFormatter.relative(reset)).font(.caption2).foregroundStyle(.secondary)
@@ -94,33 +96,82 @@ struct WindowRow: View {
     }
 }
 
-/// 每周积分节奏：已用 / 计划 / 差距三格 + 速度预测与建议。
-struct PaceSection: View {
-    let pace: WeeklyPace
-
-    private var gapColor: Color {
-        switch pace.verdict {
-        case .ahead: return .orange
-        case .behind: return .green
-        case .onTrack: return .secondary
-        }
-    }
-
-    private var gapText: String {
-        let g = Int(pace.gapPercent.rounded())
-        switch pace.verdict {
+/// 节奏差距的文案与颜色：单账号与合池视图共用。
+enum PaceFormat {
+    static func gapText(_ gapPercent: Double, verdict: WeeklyPace.Verdict) -> String {
+        let g = Int(gapPercent.rounded())
+        switch verdict {
         case .ahead: return "超前 \(g)%"
         case .behind: return "富余 \(-g)%"
         case .onTrack: return g >= 0 ? "+\(g)%" : "\(g)%"
         }
     }
 
+    static func gapColor(_ verdict: WeeklyPace.Verdict) -> Color {
+        switch verdict {
+        case .ahead: return .orange
+        case .behind: return .green
+        case .onTrack: return .secondary
+        }
+    }
+
+    static func rate(_ perHour: Double) -> String { String(format: "%.1f%%/时", perHour) }
+}
+
+/// 一格统计：标题 + 数值。
+struct StatTile: View {
+    let title: String
+    let value: String
+    var color: Color = .primary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.callout.weight(.semibold).monospacedDigit()).foregroundStyle(color)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
+    }
+}
+
+/// 详情窗口里的一个分区：标题行 + 内容，浅灰圆角底。
+struct DetailSection<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder let content: Content
+
+    init(_ title: String, systemImage: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.systemImage = systemImage
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: systemImage).font(.subheadline.weight(.semibold))
+            content
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.06)))
+    }
+}
+
+/// 每周积分节奏：已用 / 计划 / 差距三格 + 速度预测与建议。
+struct PaceSection: View {
+    let pace: WeeklyPace
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                stat("当前已用", "\(Int(pace.usedPercent.rounded()))%", .primary)
-                stat("计划截至当前", "\(Int(pace.plannedPercent.rounded()))%", .primary)
-                stat("节奏差距", gapText, gapColor)
+                StatTile(title: "当前已用", value: "\(Int(pace.usedPercent.rounded()))%")
+                StatTile(title: "计划截至当前", value: "\(Int(pace.plannedPercent.rounded()))%")
+                StatTile(
+                    title: "节奏差距",
+                    value: PaceFormat.gapText(pace.gapPercent, verdict: pace.verdict),
+                    color: PaceFormat.gapColor(pace.verdict)
+                )
             }
             VStack(alignment: .leading, spacing: 3) {
                 if let rate = pace.recentRatePerHour, let projected = pace.projectedPercentAtReset {
@@ -150,16 +201,6 @@ struct PaceSection: View {
             .font(.caption2)
         }
         .padding(.top, 2)
-    }
-
-    private func stat(_ title: String, _ value: String, _ color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption2).foregroundStyle(.secondary)
-            Text(value).font(.callout.weight(.semibold).monospacedDigit()).foregroundStyle(color)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(8)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
     }
 }
 
