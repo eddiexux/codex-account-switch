@@ -20,8 +20,17 @@ struct MenuView: View {
                     }
                 }
             }
+            if let prompt = state.loginPrompt {
+                LoginPromptBox(prompt: prompt) { state.cancelLogin() }
+            }
             if let busy = state.busyMessage {
-                Label(busy, systemImage: "hourglass").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Label(busy, systemImage: "hourglass").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if state.loginSessionActive {
+                        Button("取消") { state.cancelLogin() }.font(.caption)
+                    }
+                }
             }
             if let message = state.statusMessage {
                 Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(3)
@@ -293,6 +302,42 @@ struct PaceSection: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
+    }
+}
+
+/// 设备码登录提示：链接 + 一次性代码，可复制到任意浏览器（含隐私窗口）用另一个账号登录。
+struct LoginPromptBox: View {
+    let prompt: LoginSession.Prompt
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("在浏览器打开链接并输入代码（换账号可用隐私窗口）", systemImage: "key.horizontal")
+                .font(.caption.weight(.semibold))
+            HStack(spacing: 6) {
+                Text(prompt.url).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
+                    .textSelection(.enabled)
+                Spacer()
+                Button("复制") { copy(prompt.url) }.font(.caption)
+                Button("打开") {
+                    if let url = URL(string: prompt.url) { NSWorkspace.shared.open(url) }
+                }.font(.caption)
+            }
+            HStack(spacing: 6) {
+                Text(prompt.code).font(.title3.monospaced().weight(.semibold)).textSelection(.enabled)
+                Spacer()
+                Button("复制代码") { copy(prompt.code) }.font(.caption)
+            }
+            Text("代码 15 分钟内有效。授权完成后这里会自动更新。")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.08)))
+    }
+
+    private func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 }
 

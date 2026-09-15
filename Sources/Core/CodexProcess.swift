@@ -1,15 +1,12 @@
 import Foundation
 
-public enum CodexProcessError: LocalizedError {
+enum CodexProcessError: LocalizedError {
     case executableNotFound
-    case loginFailed(status: Int32, output: String)
 
-    public var errorDescription: String? {
+    var errorDescription: String? {
         switch self {
         case .executableNotFound:
-            return "找不到 codex 可执行文件（查找了 ~/.local/bin、/opt/homebrew/bin、/usr/local/bin 和 PATH）"
-        case .loginFailed(let status, let output):
-            return "codex login 退出码 \(status)\n\(output)"
+            return "找不到 codex 可执行文件（查找了 ChatGPT.app 内置、/opt/homebrew/bin、/usr/local/bin、~/.local/bin 和 PATH）"
         }
     }
 }
@@ -34,12 +31,15 @@ public enum CodexProcess {
         }.count
     }
 
+    /// 优先用真正的原生二进制（ChatGPT.app 内置），避免 codex-hud / npm 这类包装器：
+    /// 包装器被终止时其子进程会残留，曾造成登录回调端口被长期占用。
     public static func executable() -> URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         var candidates = [
-            "\(home)/.local/bin/codex",
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
             "/opt/homebrew/bin/codex",
             "/usr/local/bin/codex",
+            "\(home)/.local/bin/codex",
         ]
         if let path = ProcessInfo.processInfo.environment["PATH"] {
             candidates += path.split(separator: ":").map { "\($0)/codex" }
@@ -49,38 +49,8 @@ public enum CodexProcess {
             .map { URL(fileURLWithPath: $0) }
     }
 
-    /// 运行 `codex login`（浏览器 OAuth 流程）。成功后 Codex 自己会写入 auth.json。
-    /// 在后台线程阻塞等待进程退出；失败时把输出尾部带回给界面。
-    public static func runLogin() async throws {
+    public static func requireExecutable() throws -> URL {
         guard let exe = executable() else { throw CodexProcessError.executableNotFound }
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = exe
-                proc.arguments = ["login"]
-                var env = ProcessInfo.processInfo.environment
-                let home = FileManager.default.homeDirectoryForCurrentUser.path
-                env["PATH"] = "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
-                proc.environment = env
-                let pipe = Pipe()
-                proc.standardOutput = pipe
-                proc.standardError = pipe
-                proc.standardInput = FileHandle.nullDevice
-                do { try proc.run() } catch {
-                    cont.resume(throwing: error)
-                    return
-                }
-                let output = pipe.fileHandleForReading.readDataToEndOfFile()
-                proc.waitUntilExit()
-                if proc.terminationStatus == 0 {
-                    cont.resume()
-                } else {
-                    let text = String(decoding: output, as: UTF8.self)
-                    cont.resume(throwing: CodexProcessError.loginFailed(
-                        status: proc.terminationStatus, output: String(text.suffix(600))
-                    ))
-                }
-            }
-        }
+        return exe
     }
 }

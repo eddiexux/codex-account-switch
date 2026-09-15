@@ -9,7 +9,7 @@ macOS 菜单栏小工具：展示多个 ChatGPT 账号在 Codex 里的额度与�
 - 右上角菜单栏显示当前账号的周额度已用百分比
 - 展开面板：每个账号一张卡片，含邮箱、套餐、各额度窗口已用比例、重置时间
 - 「切换到此账号」：把目标账号的登录态写入 `auth.json`
-- 「添加账号…」：运行 `codex login`，浏览器登录完成后自动入库
+- 「添加账号…」/「重新登录…」：运行 `codex login --device-auth`，面板里直接显示登录链接和一次性代码，复制到任意浏览器（换账号可用隐私窗口）完成授权后自动入库；不自动弹浏览器，不占本机回调端口
 - 每 5 分钟自动刷新额度；打开面板时若超过 1 分钟未刷新也会刷新
 - 可选开机自启（需以 `.app` 形式运行）
 
@@ -23,7 +23,7 @@ cd codex-account-switch
 scripts/build-app.sh --install   # 构建、打包、安装到 ~/Applications 并启动
 ```
 
-首次启动会把当前 `~/.codex/auth.json` 登记为第一个账号；再点「添加账号…」用另一个 ChatGPT 账号登录即可。
+首次启动会把当前 `~/.codex/auth.json` 登记为第一个账号；再点「添加账号…」，把面板里的链接和代码粘到隐私窗口用另一个 ChatGPT 账号登录即可。
 
 ## 工作原理与安全边界
 
@@ -46,6 +46,12 @@ scripts/build-app.sh --install   # 构建、打包、安装到 ~/Applications �
 ## 与 codex-lb 的关系
 
 本工具是单机、单活账号的轻量方案，不做负载均衡。若之前使用 codex-lb，需要自行把 `config.toml` 的 `model_provider` 改回默认并停掉 codex-lb 服务；本工具不会替你修改这些配置。
+
+## 排障
+
+- 日志：`~/Library/Logs/CodexAccountSwitch.log`（只有动作与错误摘要，不含令牌）
+- 登录进程优先使用 ChatGPT.app 内置的原生 `codex` 二进制，而不是 `~/.local/bin/codex` 这类 codex-hud / npm 包装器：包装器被终止时子进程会残留（曾出现残留的浏览器登录进程长期占着 1457 端口，导致后续登录报 `Port … already in use`，用 `lsof -nP -iTCP:1457 -sTCP:LISTEN` 可查）
+- 某账号显示「需重新登录」：其 refresh token 已在服务端作废（过期、被复用或被 `codex login`/`codex logout` 撤销），点卡片上的「重新登录…」
 
 ## 开发
 

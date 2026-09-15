@@ -29,7 +29,12 @@ final class AppState {
     private(set) var busyMessage: String?
     private(set) var lastRefreshAt: Date?
     private(set) var codexProcessCount = 0
-    var statusMessage: String?
+    /// 设备码登录进行中时的链接与一次性代码，面板据此展示。
+    private(set) var loginPrompt: LoginSession.Prompt?
+    private var loginSession: LoginSession?
+    var statusMessage: String? {
+        didSet { if let statusMessage { AppLog.write(statusMessage) } }
+    }
     var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled {
         didSet { applyLaunchAtLogin() }
     }
@@ -200,6 +205,7 @@ final class AppState {
         isBusy = true
         busyMessage = "正在切换到 \(target.email)…"
         defer { isBusy = false; busyMessage = nil }
+        AppLog.write("切换：\(activeEntry?.email ?? "无") → \(target.email)")
         do {
             try store.activate(accountId: accountId)
             statusMessage = "已切换到 \(target.email)"
@@ -211,36 +217,63 @@ final class AppState {
         }
     }
 
-    /// 通过 `codex login` 添加账号或重新登录：先回写 live，再让 Codex 自己写新的 auth.json，
-    /// 完成后新账号自动成为活跃账号并入库。
+    /// 通过 `codex login --device-auth` 添加账号或重新登录：先回写并清空 live，
+    /// 把链接和一次性代码展示在面板上，用户在任意浏览器完成后新账号自动入库。
     func loginViaCodex() async {
         guard !isBusy else { return }
         isBusy = true
-        busyMessage = "已打开浏览器，请完成 ChatGPT 登录…"
-        defer { isBusy = false; busyMessage = nil }
+        busyMessage = "正在向 OpenAI 申请登录代码…"
+        defer { isBusy = false; busyMessage = nil; loginPrompt = nil; loginSession = nil }
         // codex login 一启动就会对现有 auth.json 执行 logout_with_revoke（服务端作废令牌）。
         // 所以先回写槽位、再删掉 auth.json，让它无东西可撤销；失败时再从槽位恢复。
         let previous: AuthSnapshot?
+        let executable: URL
         do {
+            executable = try CodexProcess.requireExecutable()
             previous = try store.syncLiveIntoSlot()
             try store.removeLive()
         } catch {
-            statusMessage = "登录前回写当前账号失败，已取消：\(error.localizedDescription)"
+            statusMessage = "登录前准备失败，已取消：\(error.localizedDescription)"
             return
         }
+        AppLog.write("开始设备码登录（已回写并清空 live，上一账号：\(previous?.displayName ?? "无")）")
+        let session = LoginSession()
+        loginSession = session
         do {
-            try await CodexProcess.runLogin()
-            if let live = try store.syncLiveIntoSlot() {
-                needsLoginCache.remove(live.accountId)
-                statusMessage = "已登录 \(live.displayName)"
-            } else {
-                restore(previous, reason: "登录未产生 auth.json")
+            try session.start(executable: executable) { [weak self] prompt in
+                self?.loginPrompt = prompt
+                self?.busyMessage = "在浏览器里打开链接并输入代码，等待授权…"
             }
         } catch {
-            restore(previous, reason: "登录未完成：\(error.localizedDescription)")
+            restore(previous, reason: "无法启动 codex login：\(error.localizedDescription)")
+            reloadEntries()
+            return
+        }
+        switch await session.waitUntilExit() {
+        case .succeeded:
+            do {
+                if let live = try store.syncLiveIntoSlot() {
+                    needsLoginCache.remove(live.accountId)
+                    statusMessage = "已登录 \(live.displayName)"
+                } else {
+                    restore(previous, reason: "登录未产生 auth.json")
+                }
+            } catch {
+                restore(previous, reason: "读取新登录态失败：\(error.localizedDescription)")
+            }
+        case .cancelled:
+            restore(previous, reason: "已取消登录")
+        case .failed(let status, let output):
+            restore(previous, reason: "登录未完成（codex 退出码 \(status)）：\(output.split(separator: "\n").last.map(String.init) ?? "")")
         }
         reloadEntries()
         await refreshUsage()
+    }
+
+    var loginSessionActive: Bool { loginSession != nil }
+
+    func cancelLogin() {
+        loginSession?.cancel()
     }
 
     private func restore(_ previous: AuthSnapshot?, reason: String) {

@@ -196,6 +196,20 @@ final class UsageModelTests: XCTestCase {
     }
 }
 
+final class LoginPromptTests: XCTestCase {
+    func testParsesDeviceCodePromptWithANSI() throws {
+        let raw = "\nWelcome to Codex [v\u{1B}[90m0.154.0\u{1B}[0m]\n\nFollow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   \u{1B}[34mhttps://auth.openai.com/codex/device\u{1B}[0m\n\n2. Enter this one-time code \u{1B}[90m(expires in 15 minutes)\u{1B}[0m\n   \u{1B}[34mABCD-EFGH\u{1B}[0m\n\n\u{1B}[90mContinue only if you started this login in Codex.\u{1B}[0m\n"
+        let prompt = LoginSession.parsePrompt(raw)
+        XCTAssertEqual(prompt?.url, "https://auth.openai.com/codex/device")
+        XCTAssertEqual(prompt?.code, "ABCD-EFGH")
+    }
+
+    func testIncompleteOutputYieldsNoPrompt() throws {
+        XCTAssertNil(LoginSession.parsePrompt("1. Open this link in your browser\n   https://auth.openai.com/codex/device\n"))
+        XCTAssertNil(LoginSession.parsePrompt("Error logging in: something"))
+    }
+}
+
 enum TestAuth {
     static func jwt(_ claims: [String: Any]) -> String {
         let payload = try! JSONSerialization.data(withJSONObject: claims)
@@ -248,6 +262,10 @@ run(AccountStoreTests.self, [
     ("testActivateUnknownAccountThrowsAndLeavesLiveUntouched", { try $0.testActivateUnknownAccountThrowsAndLeavesLiveUntouched() }),
     ("testActivateRefusesWhenLiveIsMalformed", { try $0.testActivateRefusesWhenLiveIsMalformed() }),
     ("testRemoveSlot", { try $0.testRemoveSlot() }),
+])
+run(LoginPromptTests.self, [
+    ("testParsesDeviceCodePromptWithANSI", { try $0.testParsesDeviceCodePromptWithANSI() }),
+    ("testIncompleteOutputYieldsNoPrompt", { try $0.testIncompleteOutputYieldsNoPrompt() }),
 ])
 run(UsageModelTests.self, [
     ("testWindowLabels", { try $0.testWindowLabels() }),
