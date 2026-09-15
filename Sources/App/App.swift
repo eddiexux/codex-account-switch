@@ -5,6 +5,20 @@ import CodexAccountSwitchCore
 struct CodexAccountSwitchApp: App {
     @State private var state = AppState()
 
+    init() {
+        // 开发用：CAS_OPEN=window 启动即打开详情窗口；CAS_OPEN=menu 用普通窗口预览菜单面板（菜单栏弹窗无法脚本化打开）。
+        let mode = ProcessInfo.processInfo.environment["CAS_OPEN"]
+        guard mode == "window" || mode == "menu" else { return }
+        let state = self.state
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            if mode == "window" {
+                MainWindowController.shared.show(state: state, selecting: nil)
+            } else {
+                MainWindowController.shared.showMenuPreview(state: state)
+            }
+        }
+    }
+
     var body: some Scene {
         MenuBarExtra {
             MenuView(state: state)

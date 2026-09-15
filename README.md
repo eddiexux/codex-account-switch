@@ -7,8 +7,9 @@ macOS 菜单栏小工具：展示多个 ChatGPT 账号在 Codex 里的额度与�
 ## 功能
 
 - 右上角菜单栏显示当前账号的周额度已用百分比
-- 展开面板：每个账号一张卡片，含邮箱、套餐、各额度窗口已用比例、重置时间
-- 「切换到此账号」：把目标账号的登录态写入 `auth.json`
+- 菜单面板（精简版）：每个账号一行，含邮箱、套餐、周额度条与重置时间、重置卡张数角标；「切换到此账号」把目标账号的登录态写入 `auth.json`
+- 详情窗口（菜单右上角的窗口图标、双击账号行或点重置卡角标打开）：左侧账号列表，右侧完整信息——全部额度窗口、每周节奏与速度预测、按模型单独计量的额度（如 GPT-5.3-Codex-Spark）、重置卡明细与兑换、最近 7 天用量曲线
+- 重置卡（rate limit reset credit）：OpenAI 不定期赠送，兑换后把已达上限的额度窗口清零。窗口里显示每张卡的过期时间，「使用一张重置卡」二次确认后优先消耗最早过期的那张（与 codex-lb 一致）；当前没有窗口达上限时服务端会返回「无需重置」并保留卡片
 - 「添加账号…」/「重新登录…」：运行 `codex login --device-auth`，面板里直接显示登录链接和一次性代码，复制到任意浏览器（换账号可用隐私窗口）完成授权后自动入库；不自动弹浏览器，不占本机回调端口
 - 每 5 分钟自动刷新额度；打开面板时若超过 1 分钟未刷新也会刷新
 - 可选开机自启（需以 `.app` 形式运行）
@@ -30,7 +31,8 @@ scripts/build-app.sh --install   # 构建、打包、安装到 ~/Applications �
 数据来源：
 
 - 账号身份来自 `auth.json` 里 `id_token` 的 `email` / `chatgpt_plan_type` 声明（仅解码，不校验签名，不用于鉴权）
-- 额度来自 `GET https://chatgpt.com/backend-api/wham/usage`，与 Codex CLI `/status` 同源
+- 额度来自 `GET https://chatgpt.com/backend-api/wham/usage`，与 Codex CLI `/status` 同源；其中 `rate_limit_reset_credits.available_count` 是重置卡张数，`applicable_available_count` 表示此刻是否有窗口可被清零
+- 重置卡明细与兑换走 `GET/POST https://chatgpt.com/backend-api/wham/rate-limit-reset-credits[/consume]`，与 Codex TUI 的「Redeem usage limit reset」和 codex-lb 同一接口；兑换请求带随机 `redeem_request_id`，不幂等、失败不重试
 
 账号快照存放在 `~/Library/Application Support/CodexAccountSwitch/accounts/<account_id>.json`，目录 0700、文件 0600，内容就是对应账号完整的 `auth.json` 原始字节。
 
@@ -57,7 +59,10 @@ scripts/build-app.sh --install   # 构建、打包、安装到 ~/Applications �
 
 ```bash
 swift build            # 调试构建
+swift run selftest     # 契约自测（Command Line Tools 没有 XCTest）
 .build/debug/CodexAccountSwitch   # 直接运行（无 .app 包时"开机自启"不可用）
+CAS_OPEN=window .build/debug/CodexAccountSwitch   # 启动即打开详情窗口，便于截图核对
+CAS_OPEN=menu .build/debug/CodexAccountSwitch     # 用普通窗口预览菜单面板（菜单栏弹窗无法脚本化打开）
 scripts/build-app.sh   # 打包到 build/
 ```
 

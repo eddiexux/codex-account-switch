@@ -11,6 +11,8 @@ struct AccountEntry: Identifiable {
     /// refresh_token 已终态失效，只能重新登录。
     var needsLogin: Bool
     var pace: WeeklyPace?
+    /// 名下重置卡明细；只有 usage 说有可用卡时才会去拉，拉失败为 nil。
+    var resetCredits: ResetCreditList?
 
     var id: String { snapshot.accountId }
     var email: String { snapshot.displayName }
@@ -18,6 +20,18 @@ struct AccountEntry: Identifiable {
         let plan = usage?.planType ?? snapshot.planType ?? ""
         return plan.isEmpty ? "—" : plan.prefix(1).uppercased() + plan.dropFirst()
     }
+
+    /// 可用重置卡张数：明细优先，没有明细就用 usage 里的摘要。
+    var availableResetCredits: Int {
+        resetCredits?.availableCount ?? usage?.resetCredits?.availableCount ?? 0
+    }
+
+    /// 此刻有没有已达上限的窗口可以被重置卡清零。
+    var resetCreditApplicable: Bool {
+        (usage?.resetCredits?.applicableCount ?? 0) > 0 || usage?.limitReached == true
+    }
+
+    var canRedeemResetCredit: Bool { availableResetCredits > 0 && !needsLogin }
 }
 
 @MainActor
@@ -32,6 +46,8 @@ final class AppState {
     /// 设备码登录进行中时的链接与一次性代码，面板据此展示。
     private(set) var loginPrompt: LoginSession.Prompt?
     private var loginSession: LoginSession?
+    /// GUI 窗口里当前选中的账号；nil 表示跟随活跃账号。
+    var selectedAccountId: String?
     var statusMessage: String? {
         didSet { if let statusMessage { AppLog.write(statusMessage) } }
     }
@@ -43,6 +59,7 @@ final class AppState {
     private let history = UsageHistoryStore()
     private var timer: Timer?
     private var usageCache: [String: UsageSnapshot] = [:]
+    private var resetCreditCache: [String: ResetCreditList] = [:]
     private var needsLoginCache: Set<String> = []
 
     nonisolated static let refreshInterval: TimeInterval = 5 * 60
@@ -58,6 +75,10 @@ final class AppState {
     }
 
     var activeEntry: AccountEntry? { entries.first(where: \.isActive) }
+
+    var selectedEntry: AccountEntry? {
+        entries.first(where: { $0.id == selectedAccountId }) ?? activeEntry ?? entries.first
+    }
 
     /// 菜单栏文字：活跃账号周窗已用百分比；拿不到就留空只显示图标。
     var menuBarTitle: String {
@@ -79,6 +100,10 @@ final class AppState {
         return "person.crop.circle"
     }
 
+    func usageSamples(for accountId: String) -> [UsageSample] {
+        history.samples(for: accountId)
+    }
+
     // MARK: 状态装载
 
     /// 把 live auth.json 回写到槽位，再从槽位目录重建列表。缓存的额度数据按 account_id 复用。
@@ -97,7 +122,8 @@ final class AppState {
                 usage: usageCache[slot.accountId],
                 errorMessage: nil,
                 needsLogin: needsLoginCache.contains(slot.accountId),
-                pace: pace(accountId: slot.accountId, usage: usageCache[slot.accountId])
+                pace: pace(accountId: slot.accountId, usage: usageCache[slot.accountId]),
+                resetCredits: resetCreditCache[slot.accountId]
             )
         }
         codexProcessCount = CodexProcess.runningCount()
@@ -111,25 +137,31 @@ final class AppState {
         defer { isRefreshing = false }
         reloadEntries()
 
-        await withTaskGroup(of: (String, Result<UsageSnapshot, Error>, AuthSnapshot?).self) { group in
+        await withTaskGroup(of: FetchOutcome.self) { group in
             for entry in entries {
                 group.addTask { [store] in
                     await Self.fetchUsage(for: entry, store: store)
                 }
             }
-            for await (id, result, renewed) in group {
-                guard let index = entries.firstIndex(where: { $0.id == id }) else { continue }
-                if let renewed { entries[index] = AccountEntry(
-                    snapshot: renewed, isActive: entries[index].isActive,
-                    usage: entries[index].usage, errorMessage: nil, needsLogin: false
-                ) }
-                switch result {
+            for await outcome in group {
+                guard let index = entries.firstIndex(where: { $0.id == outcome.id }) else { continue }
+                let id = outcome.id
+                if let renewed = outcome.renewed {
+                    entries[index] = AccountEntry(
+                        snapshot: renewed, isActive: entries[index].isActive,
+                        usage: entries[index].usage, errorMessage: nil, needsLogin: false,
+                        resetCredits: entries[index].resetCredits
+                    )
+                }
+                switch outcome.result {
                 case .success(let usage):
                     usageCache[id] = usage
+                    resetCreditCache[id] = outcome.resetCredits
                     needsLoginCache.remove(id)
                     if let window = usage.headlineWindow { history.record(accountId: id, window: window) }
                     entries[index].usage = usage
                     entries[index].pace = pace(accountId: id, usage: usage)
+                    entries[index].resetCredits = outcome.resetCredits
                     entries[index].errorMessage = nil
                     entries[index].needsLogin = false
                 case .failure(let error):
@@ -159,10 +191,16 @@ final class AppState {
         return WeeklyPace(window: window, samples: history.samples(for: accountId))
     }
 
+    private struct FetchOutcome {
+        let id: String
+        let result: Result<UsageSnapshot, Error>
+        let renewed: AuthSnapshot?
+        let resetCredits: ResetCreditList?
+    }
+
     /// 单个账号的额度获取。待机账号在令牌临期或 401 时先续期再重试；活跃账号从不由工具续期。
-    nonisolated private static func fetchUsage(
-        for entry: AccountEntry, store: AccountStore
-    ) async -> (String, Result<UsageSnapshot, Error>, AuthSnapshot?) {
+    /// usage 说名下有重置卡时顺便拉明细（拿过期时间）；明细失败不影响额度本身。
+    nonisolated private static func fetchUsage(for entry: AccountEntry, store: AccountStore) async -> FetchOutcome {
         var snapshot = entry.snapshot
         var renewed: AuthSnapshot?
         let canRenew = !entry.isActive && !entry.needsLogin
@@ -179,22 +217,29 @@ final class AppState {
             }
         }
 
+        func fetchBoth() async throws -> (UsageSnapshot, ResetCreditList?) {
+            let usage = try await UsageClient.fetch(accessToken: snapshot.accessToken, accountId: snapshot.accountId)
+            guard (usage.resetCredits?.availableCount ?? 0) > 0 else { return (usage, nil) }
+            let credits = try? await ResetCreditsClient.fetch(accessToken: snapshot.accessToken, accountId: snapshot.accountId)
+            return (usage, credits)
+        }
+
         if canRenew, snapshot.accessTokenExpires(within: refreshTokenLeadTime), let err = await renew() {
-            return (entry.id, .failure(err), nil)
+            return FetchOutcome(id: entry.id, result: .failure(err), renewed: nil, resetCredits: nil)
         }
         do {
-            let usage = try await UsageClient.fetch(accessToken: snapshot.accessToken, accountId: snapshot.accountId)
-            return (entry.id, .success(usage), renewed)
+            let (usage, credits) = try await fetchBoth()
+            return FetchOutcome(id: entry.id, result: .success(usage), renewed: renewed, resetCredits: credits)
         } catch UsageError.unauthorized where canRenew && renewed == nil {
-            if let err = await renew() { return (entry.id, .failure(err), nil) }
+            if let err = await renew() { return FetchOutcome(id: entry.id, result: .failure(err), renewed: nil, resetCredits: nil) }
             do {
-                let usage = try await UsageClient.fetch(accessToken: snapshot.accessToken, accountId: snapshot.accountId)
-                return (entry.id, .success(usage), renewed)
+                let (usage, credits) = try await fetchBoth()
+                return FetchOutcome(id: entry.id, result: .success(usage), renewed: renewed, resetCredits: credits)
             } catch {
-                return (entry.id, .failure(error), renewed)
+                return FetchOutcome(id: entry.id, result: .failure(error), renewed: renewed, resetCredits: nil)
             }
         } catch {
-            return (entry.id, .failure(error), renewed)
+            return FetchOutcome(id: entry.id, result: .failure(error), renewed: renewed, resetCredits: nil)
         }
     }
 
@@ -215,6 +260,41 @@ final class AppState {
             statusMessage = "切换失败：\(error.localizedDescription)"
             reloadEntries()
         }
+    }
+
+    /// 兑换一张重置卡：先重新拉明细（以服务端为准，不用缓存），挑最早过期的那张，再 POST consume。
+    /// 兑换不幂等，任何失败都不重试；结果以刷新后的额度为准。
+    func redeemResetCredit(accountId: String) async {
+        guard !isBusy, let entry = entries.first(where: { $0.id == accountId }), !entry.needsLogin else { return }
+        isBusy = true
+        busyMessage = "正在为 \(entry.email) 兑换重置卡…"
+        defer { isBusy = false; busyMessage = nil }
+
+        let snapshot = entry.snapshot
+        do {
+            let list = try await ResetCreditsClient.fetch(accessToken: snapshot.accessToken, accountId: snapshot.accountId)
+            resetCreditCache[accountId] = list
+            if let index = entries.firstIndex(where: { $0.id == accountId }) { entries[index].resetCredits = list }
+            guard let credit = list.soonestExpiring else {
+                statusMessage = "\(entry.email) 没有可用的重置卡"
+                return
+            }
+            let requestId = UUID().uuidString
+            AppLog.write("兑换重置卡：\(entry.email) credit=\(credit.id.suffix(8)) request=\(requestId.prefix(8))")
+            let outcome = try await ResetCreditsClient.consume(
+                accessToken: snapshot.accessToken, accountId: snapshot.accountId,
+                creditId: credit.id, redeemRequestId: requestId
+            )
+            statusMessage = "\(entry.email)：\(outcome.message)"
+        } catch UsageError.unauthorized {
+            statusMessage = entry.isActive
+                ? "\(entry.email) 的访问令牌已过期，等 Codex 续期后再试"
+                : "\(entry.email) 的令牌已失效，先刷新一次再试"
+        } catch {
+            statusMessage = "兑换失败：\(error.localizedDescription)"
+        }
+        resetCreditCache[accountId] = nil
+        await refreshUsage()
     }
 
     /// 通过 `codex login --device-auth` 添加账号或重新登录：先回写并清空 live，
@@ -294,8 +374,10 @@ final class AppState {
         do {
             try store.removeSlot(accountId: accountId)
             usageCache[accountId] = nil
+            resetCreditCache[accountId] = nil
             needsLoginCache.remove(accountId)
             history.remove(accountId: accountId)
+            if selectedAccountId == accountId { selectedAccountId = nil }
             reloadEntries()
         } catch {
             statusMessage = "删除失败：\(error.localizedDescription)"

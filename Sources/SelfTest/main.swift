@@ -33,6 +33,10 @@ func XCTAssertEqual(_ a: @autoclosure () throws -> Double, _ b: @autoclosure () 
     do { let x = try a(), y = try b(); if abs(x - y) <= accuracy { passed += 1 } else { failures += 1; print("FAIL \(file):\(line) — \(x) !≈ \(y)") } }
     catch { failures += 1; print("FAIL \(file):\(line) — threw \(error)") }
 }
+func XCTAssertEqual(_ a: @autoclosure () throws -> Date?, _ b: @autoclosure () throws -> Date, accuracy: Double, file: String = #fileID, line: Int = #line) {
+    do { let x = try a(), y = try b(); if let x, abs(x.timeIntervalSince(y)) <= accuracy { passed += 1 } else { failures += 1; print("FAIL \(file):\(line) — \(String(describing: x)) !≈ \(y)") } }
+    catch { failures += 1; print("FAIL \(file):\(line) — threw \(error)") }
+}
 class XCTestCase {
     required init() {}
     func setUpWithError() throws {}
@@ -283,6 +287,101 @@ final class WeeklyPaceTests: XCTestCase {
     }
 }
 
+final class ResetCreditTests: XCTestCase {
+    let now = Date(timeIntervalSince1970: 1_789_500_000)
+
+    func creditJSON(_ id: String, status: String, expires: String?) -> [String: Any] {
+        var d: [String: Any] = [
+            "id": id, "reset_type": "codex_rate_limits", "is_supported_by_plan": true, "status": status,
+            "granted_at": "2026-09-04T05:42:32.617193Z", "title": "Full reset",
+            "description": "one free rate limit reset",
+        ]
+        d["expires_at"] = expires.map { $0 as Any } ?? NSNull()
+        return d
+    }
+
+    func testParsesListAndPicksSoonestExpiringAvailableCredit() throws {
+        let object: [String: Any] = [
+            "credits": [
+                creditJSON("late", status: "available", expires: "2026-10-05T04:20:52.345877Z"),
+                creditJSON("used", status: "redeemed", expires: "2026-09-20T00:00:00Z"),
+                creditJSON("soon", status: "available", expires: "2026-10-04T05:42:32.617193Z"),
+                creditJSON("never", status: "available", expires: nil),
+            ],
+            "available_count": 3,
+            "total_earned_count": 0,
+        ]
+        let list = try ResetCreditList.parse(object, fetchedAt: now)
+        XCTAssertEqual(list.availableCount, 3)
+        XCTAssertEqual(list.credits.count, 4)
+        XCTAssertEqual(list.available.map(\.id), ["late", "soon", "never"])
+        XCTAssertEqual(list.soonestExpiring?.id, "soon", "与 codex-lb 一致：先用最早过期的那张，没有过期时间的排最后")
+        XCTAssertEqual(list.nearestExpiresAt, ISO8601DateFormatter().date(from: "2026-10-04T05:42:32Z")!.addingTimeInterval(0.617193), accuracy: 0.001)
+        XCTAssertEqual(list.credits.first?.title, "Full reset")
+        XCTAssertTrue(list.credits.first?.isSupportedByPlan == true)
+    }
+
+    func testAvailableCountIsAuthoritativeOverCreditStatuses() throws {
+        let object: [String: Any] = [
+            "credits": [creditJSON("stale", status: "available", expires: "2026-10-05T04:20:52Z")],
+            "available_count": 0,
+        ]
+        let list = try ResetCreditList.parse(object, fetchedAt: now)
+        XCTAssertNil(list.soonestExpiring, "服务端说 0 张可用就不能挑任何一张去兑换")
+        XCTAssertNil(list.nearestExpiresAt)
+    }
+
+    func testMissingCountFallsBackToCountingAvailableStatuses() throws {
+        let object: [String: Any] = ["credits": [
+            creditJSON("a", status: "available", expires: nil),
+            creditJSON("b", status: "redeemed", expires: nil),
+        ]]
+        XCTAssertEqual(try ResetCreditList.parse(object, fetchedAt: now).availableCount, 1)
+        XCTAssertThrowsError(try ResetCreditList.parse(["available_count": 2], fetchedAt: now), "没有 credits 数组视为格式错误")
+    }
+
+    func testConsumeOutcomeCodes() throws {
+        let reset = try ResetCreditConsumeOutcome.parse(["code": "reset", "windows_reset": 2, "credit": ["id": "x"]])
+        XCTAssertEqual(reset.code, .reset)
+        XCTAssertEqual(reset.windowsReset, 2)
+        XCTAssertTrue(reset.message.contains("2"))
+        XCTAssertEqual(try ResetCreditConsumeOutcome.parse(["code": "nothing_to_reset"]).code, .nothingToReset)
+        XCTAssertEqual(try ResetCreditConsumeOutcome.parse(["code": "no_credit"]).code, .noCredit)
+        XCTAssertEqual(try ResetCreditConsumeOutcome.parse(["code": "already_redeemed"]).code, .alreadyRedeemed)
+        XCTAssertEqual(try ResetCreditConsumeOutcome.parse(["code": "surprise"]).code, .other("surprise"))
+        XCTAssertThrowsError(try ResetCreditConsumeOutcome.parse(["windows_reset": 1]))
+    }
+
+    func testUsageSnapshotParsesResetCreditSummaryAndAdditionalLimits() throws {
+        // 形状取自真实 /wham/usage 响应（2026-09-15）。
+        let object: [String: Any] = [
+            "plan_type": "pro",
+            "rate_limit": [
+                "allowed": true, "limit_reached": false,
+                "primary_window": ["used_percent": 27, "limit_window_seconds": 604_800, "reset_after_seconds": 319_896, "reset_at": 1_789_805_392],
+                "secondary_window": NSNull(),
+            ],
+            "additional_rate_limits": [[
+                "limit_name": "GPT-5.3-Codex-Spark", "metered_feature": "codex_bengalfox",
+                "rate_limit": [
+                    "primary_window": ["used_percent": 0, "limit_window_seconds": 18_000, "reset_at": 1_789_503_497],
+                    "secondary_window": ["used_percent": 0, "limit_window_seconds": 604_800, "reset_at": 1_790_090_297],
+                ],
+            ]],
+            "rate_limit_reset_credits": ["available_count": 2, "applicable_available_count": 0],
+        ]
+        let usage = UsageSnapshot.parse(object, fetchedAt: now)
+        XCTAssertEqual(usage.resetCredits, ResetCreditSummary(availableCount: 2, applicableCount: 0))
+        XCTAssertEqual(usage.windows.count, 1)
+        XCTAssertEqual(usage.headlineWindow?.label, "每周")
+        XCTAssertEqual(usage.additionalLimits.map(\.name), ["GPT-5.3-Codex-Spark"])
+        XCTAssertEqual(usage.additionalLimits.first?.windows.map(\.label), ["5 小时", "每周"])
+        let bare = UsageSnapshot.parse(["rate_limit": ["primary_window": ["used_percent": 5]]], fetchedAt: now)
+        XCTAssertNil(bare.resetCredits, "老响应没有该字段时为 nil，界面按 0 张处理")
+        XCTAssertTrue(bare.additionalLimits.isEmpty)
+    }
+}
+
 enum TestAuth {
     static func jwt(_ claims: [String: Any]) -> String {
         let payload = try! JSONSerialization.data(withJSONObject: claims)
@@ -350,6 +449,13 @@ run(WeeklyPaceTests.self, [
 run(UsageModelTests.self, [
     ("testWindowLabels", { try $0.testWindowLabels() }),
     ("testHeadlinePrefersWeeklyWindow", { try $0.testHeadlinePrefersWeeklyWindow() }),
+])
+run(ResetCreditTests.self, [
+    ("testParsesListAndPicksSoonestExpiringAvailableCredit", { try $0.testParsesListAndPicksSoonestExpiringAvailableCredit() }),
+    ("testAvailableCountIsAuthoritativeOverCreditStatuses", { try $0.testAvailableCountIsAuthoritativeOverCreditStatuses() }),
+    ("testMissingCountFallsBackToCountingAvailableStatuses", { try $0.testMissingCountFallsBackToCountingAvailableStatuses() }),
+    ("testConsumeOutcomeCodes", { try $0.testConsumeOutcomeCodes() }),
+    ("testUsageSnapshotParsesResetCreditSummaryAndAdditionalLimits", { try $0.testUsageSnapshotParsesResetCreditSummaryAndAdditionalLimits() }),
 ])
 print("\n\(passed) assertions passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
