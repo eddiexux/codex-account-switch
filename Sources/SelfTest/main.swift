@@ -24,6 +24,15 @@ func XCTAssertThrowsError<T>(_ a: @autoclosure () throws -> T, _ msg: String = "
 func XCTAssertNoThrow<T>(_ a: @autoclosure () throws -> T, _ msg: String = "", file: String = #fileID, line: Int = #line) {
     do { _ = try a(); passed += 1 } catch { failures += 1; print("FAIL \(file):\(line) \(msg) — threw \(error)") }
 }
+struct UnwrapFailure: Error {}
+func XCTUnwrap<T>(_ a: @autoclosure () throws -> T?, file: String = #fileID, line: Int = #line) throws -> T {
+    if let v = try a() { return v }
+    failures += 1; print("FAIL \(file):\(line) — unexpected nil"); throw UnwrapFailure()
+}
+func XCTAssertEqual(_ a: @autoclosure () throws -> Double, _ b: @autoclosure () throws -> Double, accuracy: Double, file: String = #fileID, line: Int = #line) {
+    do { let x = try a(), y = try b(); if abs(x - y) <= accuracy { passed += 1 } else { failures += 1; print("FAIL \(file):\(line) — \(x) !≈ \(y)") } }
+    catch { failures += 1; print("FAIL \(file):\(line) — threw \(error)") }
+}
 class XCTestCase {
     required init() {}
     func setUpWithError() throws {}
@@ -210,6 +219,70 @@ final class LoginPromptTests: XCTestCase {
     }
 }
 
+final class WeeklyPaceTests: XCTestCase {
+    // 7 天窗口，已过去 2 天（计划 28.6%），实际用 40%。
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    var window: UsageWindow { UsageWindow(usedPercent: 40, windowSeconds: 604_800, resetAt: now.addingTimeInterval(5 * 86_400)) }
+
+    func testLinearBaselineAndGap() throws {
+        let pace = try XCTUnwrap(WeeklyPace(window: window, samples: [], now: now))
+        XCTAssertEqual(Int(pace.plannedPercent.rounded()), 29)
+        XCTAssertEqual(Int(pace.gapPercent.rounded()), 11)
+        XCTAssertEqual(pace.verdict, .ahead)
+        XCTAssertEqual(Int(pace.remainingPercent), 60)
+        XCTAssertEqual(pace.sustainablePercentPerDay, 12, accuracy: 0.01)
+        XCTAssertNil(pace.recentRatePerHour, "没有采样不做速度预测")
+    }
+
+    func testRecentRateProjectsExhaustionBeforeReset() throws {
+        let reset = window.resetAt!
+        let samples = [
+            UsageSample(at: now.addingTimeInterval(-3 * 3600), usedPercent: 25, resetAt: reset),
+            UsageSample(at: now, usedPercent: 40, resetAt: reset),
+        ]  // 5%/小时 → 剩 60% 只能撑 12 小时，远早于 5 天后的重置
+        let pace = try XCTUnwrap(WeeklyPace(window: window, samples: samples, now: now))
+        XCTAssertEqual(try XCTUnwrap(pace.recentRatePerHour), 5, accuracy: 0.01)
+        XCTAssertEqual(try XCTUnwrap(pace.projectedExhaustionAt), now.addingTimeInterval(12 * 3600))
+        XCTAssertTrue(try XCTUnwrap(pace.projectedPercentAtReset) > 100)
+    }
+
+    func testSlowRateProjectsNoExhaustion() throws {
+        let reset = window.resetAt!
+        let samples = [
+            UsageSample(at: now.addingTimeInterval(-6 * 3600), usedPercent: 39, resetAt: reset),
+            UsageSample(at: now, usedPercent: 40, resetAt: reset),
+        ]  // 1%/6h → 5 天再用 20%，到重置约 60%
+        let pace = try XCTUnwrap(WeeklyPace(window: window, samples: samples, now: now))
+        XCTAssertNil(pace.projectedExhaustionAt)
+        XCTAssertEqual(Int(try XCTUnwrap(pace.projectedPercentAtReset).rounded()), 60)
+    }
+
+    func testIgnoresSamplesFromPreviousWindowAndTooShortSpan() throws {
+        let reset = window.resetAt!
+        let previousWindow = [UsageSample(at: now.addingTimeInterval(-3600), usedPercent: 90, resetAt: reset.addingTimeInterval(-604_800))]
+        XCTAssertNil(try XCTUnwrap(WeeklyPace(window: window, samples: previousWindow, now: now)).recentRatePerHour)
+        let tooShort = [
+            UsageSample(at: now.addingTimeInterval(-600), usedPercent: 30, resetAt: reset),
+            UsageSample(at: now, usedPercent: 40, resetAt: reset),
+        ]
+        XCTAssertNil(try XCTUnwrap(WeeklyPace(window: window, samples: tooShort, now: now)).recentRatePerHour)
+    }
+
+    func testHistoryStoreDedupesWithinMinuteAndPersists() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cas-hist-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = UsageHistoryStore(fileURL: url)
+        store.record(accountId: "A", window: window, at: now)
+        store.record(accountId: "A", window: window, at: now.addingTimeInterval(30))
+        store.record(accountId: "A", window: window, at: now.addingTimeInterval(120))
+        XCTAssertEqual(store.samples(for: "A").count, 2)
+        let reloaded = UsageHistoryStore(fileURL: url)
+        XCTAssertEqual(reloaded.samples(for: "A").map(\.usedPercent), [40, 40])
+        reloaded.remove(accountId: "A")
+        XCTAssertTrue(UsageHistoryStore(fileURL: url).samples(for: "A").isEmpty)
+    }
+}
+
 enum TestAuth {
     static func jwt(_ claims: [String: Any]) -> String {
         let payload = try! JSONSerialization.data(withJSONObject: claims)
@@ -266,6 +339,13 @@ run(AccountStoreTests.self, [
 run(LoginPromptTests.self, [
     ("testParsesDeviceCodePromptWithANSI", { try $0.testParsesDeviceCodePromptWithANSI() }),
     ("testIncompleteOutputYieldsNoPrompt", { try $0.testIncompleteOutputYieldsNoPrompt() }),
+])
+run(WeeklyPaceTests.self, [
+    ("testLinearBaselineAndGap", { try $0.testLinearBaselineAndGap() }),
+    ("testRecentRateProjectsExhaustionBeforeReset", { try $0.testRecentRateProjectsExhaustionBeforeReset() }),
+    ("testSlowRateProjectsNoExhaustion", { try $0.testSlowRateProjectsNoExhaustion() }),
+    ("testIgnoresSamplesFromPreviousWindowAndTooShortSpan", { try $0.testIgnoresSamplesFromPreviousWindowAndTooShortSpan() }),
+    ("testHistoryStoreDedupesWithinMinuteAndPersists", { try $0.testHistoryStoreDedupesWithinMinuteAndPersists() }),
 ])
 run(UsageModelTests.self, [
     ("testWindowLabels", { try $0.testWindowLabels() }),
