@@ -64,6 +64,7 @@ swift run selftest     # 契约自测（Command Line Tools 没有 XCTest）
 CAS_OPEN=window .build/debug/CodexAccountSwitch   # 启动即打开详情窗口，便于截图核对
 CAS_OPEN=menu .build/debug/CodexAccountSwitch     # 用普通窗口预览菜单面板（菜单栏弹窗无法脚本化打开）
 scripts/build-app.sh   # 打包到 build/
+scripts/make-icon.sh   # 改过 Resources/AppIcon.svg 后重新生成 AppIcon.icns（需 brew install librsvg）
 ```
 
 ## License
