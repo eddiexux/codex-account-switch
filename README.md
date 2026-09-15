@@ -1,0 +1,60 @@
+# Codex Account Switch
+
+macOS 菜单栏小工具：展示多个 ChatGPT 账号在 Codex 里的额度与重置时间，一键切换当前使用的账号。
+
+切换动作**只原子替换 `~/.codex/auth.json`**，不碰 `config.toml` 或任何其他配置。
+
+## 功能
+
+- 右上角菜单栏显示当前账号的周额度已用百分比
+- 展开面板：每个账号一张卡片，含邮箱、套餐、各额度窗口已用比例、重置时间
+- 「切换到此账号」：把目标账号的登录态写入 `auth.json`
+- 「添加账号…」：运行 `codex login`，浏览器登录完成后自动入库
+- 每 5 分钟自动刷新额度；打开面板时若超过 1 分钟未刷新也会刷新
+- 可选开机自启（需以 `.app` 形式运行）
+
+## 安装
+
+要求 macOS 14+ 与 Xcode Command Line Tools（`xcode-select --install`），不需要完整 Xcode。
+
+```bash
+git clone git@github.com:eddiexux/codex-account-switch.git
+cd codex-account-switch
+scripts/build-app.sh --install   # 构建、打包、安装到 ~/Applications 并启动
+```
+
+首次启动会把当前 `~/.codex/auth.json` 登记为第一个账号；再点「添加账号…」用另一个 ChatGPT 账号登录即可。
+
+## 工作原理与安全边界
+
+数据来源：
+
+- 账号身份来自 `auth.json` 里 `id_token` 的 `email` / `chatgpt_plan_type` 声明（仅解码，不校验签名，不用于鉴权）
+- 额度来自 `GET https://chatgpt.com/backend-api/wham/usage`，与 Codex CLI `/status` 同源
+
+账号快照存放在 `~/Library/Application Support/CodexAccountSwitch/accounts/<account_id>.json`，目录 0700、文件 0600，内容就是对应账号完整的 `auth.json` 原始字节。
+
+四条不变量：
+
+1. **live 优先回写。** Codex 每次续期都会轮换 refresh token，旧副本一旦复用会被 OpenAI 永久拒绝。因此任何切换或登录前，工具都先把当前 `auth.json` 回写到它所属账号的槽位，再写入目标账号。
+2. **活跃账号的令牌只由 Codex 维护。** 工具只为待机账号续期（访问令牌距过期不足 24 小时或收到 401 时），续期结果写回槽位；绝不替活跃账号刷新，避免与 Codex 进程竞争同一条 refresh token 链。
+3. **登录前先清空 live。** `codex login` 开始时会对现有 `auth.json` 执行 `logout_with_revoke`，在服务端作废当前账号的令牌（返回 `refresh_token_invalidated`）。工具在运行它之前先把当前账号回写到槽位、再删除 `auth.json`，登录流程就无东西可撤销；登录失败或被中断时自动从槽位恢复上一账号。**不要在工具之外手动运行 `codex login`**，否则当前账号会被作废。
+4. **原子写入。** 写 `auth.json` 与槽位文件都走同目录临时文件 + `rename`，Codex 任何时刻读到的都是完整文件。
+
+已在运行的 Codex 进程（ChatGPT 桌面端内置 app-server、Paseo、终端 TUI）在内存里持有旧账号令牌。Codex 自身在刷新前会重读 `auth.json` 并比对 account_id，不一致就跳过刷新，所以旧进程不会把新账号覆盖回去；但它们也不会自动换到新账号，**切换只对新会话生效**。面板底部会显示当前运行的 Codex 进程数作为提示。
+
+## 与 codex-lb 的关系
+
+本工具是单机、单活账号的轻量方案，不做负载均衡。若之前使用 codex-lb，需要自行把 `config.toml` 的 `model_provider` 改回默认并停掉 codex-lb 服务；本工具不会替你修改这些配置。
+
+## 开发
+
+```bash
+swift build            # 调试构建
+.build/debug/CodexAccountSwitch   # 直接运行（无 .app 包时"开机自启"不可用）
+scripts/build-app.sh   # 打包到 build/
+```
+
+## License
+
+MIT
