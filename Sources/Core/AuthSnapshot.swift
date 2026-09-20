@@ -25,6 +25,9 @@ public struct AuthSnapshot {
     public let refreshToken: String
     public let accessTokenExpiresAt: Date?
     public let lastRefresh: String?
+    /// ChatGPT 订阅（会员）到期时间；来自 id_token 里的 chatgpt_subscription_active_until 字段。
+    /// API key 模式或旧版 token 里没有此字段时为 nil。
+    public let subscriptionActiveUntil: Date?
 
     public init(data: Data) throws {
         guard
@@ -50,6 +53,7 @@ public struct AuthSnapshot {
         self.refreshToken = refreshToken
         self.accessTokenExpiresAt = (accessClaims["exp"] as? Double).map { Date(timeIntervalSince1970: $0) }
         self.lastRefresh = object["last_refresh"] as? String
+        self.subscriptionActiveUntil = ISO8601.parse(authClaims?["chatgpt_subscription_active_until"])
     }
 
     public static func load(from url: URL) throws -> AuthSnapshot {

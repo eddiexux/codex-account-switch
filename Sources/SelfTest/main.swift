@@ -107,6 +107,39 @@ final class AuthSnapshotTests: XCTestCase {
         XCTAssertEqual(reparsed["auth_mode"] as? String, "chatgpt")
         XCTAssertNotEqual(reparsed["last_refresh"] as? String, object["last_refresh"] as? String)
     }
+
+    func testParsesSubscriptionActiveUntil() throws {
+        // 有 chatgpt_subscription_active_until 时应解析出日期。
+        let until = "2026-10-06T12:24:55+00:00"
+        let idTokenWithSub = TestAuth.jwt([
+            "email": "sub@example.com",
+            "https://api.openai.com/auth": [
+                "chatgpt_account_id": "sub-acc",
+                "chatgpt_plan_type": "pro",
+                "chatgpt_subscription_active_until": until,
+            ],
+        ])
+        let accessToken = TestAuth.jwt(["exp": Date().addingTimeInterval(3600).timeIntervalSince1970])
+        let obj: [String: Any] = [
+            "auth_mode": "chatgpt",
+            "tokens": [
+                "id_token": idTokenWithSub,
+                "access_token": accessToken,
+                "refresh_token": "rt-sub",
+                "account_id": "sub-acc",
+            ],
+            "last_refresh": "2026-01-01T00:00:00.000000Z",
+        ]
+        let snap = try AuthSnapshot(data: JSONSerialization.data(withJSONObject: obj))
+        XCTAssertTrue(snap.subscriptionActiveUntil != nil, "subscriptionActiveUntil 不应为 nil")
+        // 2026-10-06T12:24:55 UTC = 1791289495
+        let expected = Date(timeIntervalSince1970: 1_791_289_495)
+        XCTAssertEqual(snap.subscriptionActiveUntil?.timeIntervalSince1970 ?? 0, expected.timeIntervalSince1970, accuracy: 5)
+
+        // 无此字段时应为 nil。
+        let snapNoSub = try AuthSnapshot(data: TestAuth.authJSON(accountId: "no-sub", email: "x@y.z", plan: "pro", accessExp: 0))
+        XCTAssertNil(snapNoSub.subscriptionActiveUntil, "旧 token 里没有该字段时应为 nil")
+    }
 }
 
 final class AccountStoreTests: XCTestCase {
@@ -489,6 +522,7 @@ run(AuthSnapshotTests.self, [
     ("testFallsBackToIdTokenAccountIdWhenTokensLackIt", { try $0.testFallsBackToIdTokenAccountIdWhenTokensLackIt() }),
     ("testRejectsFilesWithoutTokens", { try $0.testRejectsFilesWithoutTokens() }),
     ("testReplacingTokensKeepsUnknownFieldsAndRotatesRefreshToken", { try $0.testReplacingTokensKeepsUnknownFieldsAndRotatesRefreshToken() }),
+    ("testParsesSubscriptionActiveUntil", { try $0.testParsesSubscriptionActiveUntil() }),
 ])
 run(AccountStoreTests.self, [
     ("testSyncLiveIntoSlotStoresExactBytesWithPrivatePermissions", { try $0.testSyncLiveIntoSlotStoresExactBytesWithPrivatePermissions() }),

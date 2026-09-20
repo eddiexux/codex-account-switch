@@ -135,6 +135,11 @@ struct CompactAccountRow: View {
             } else {
                 Text("额度加载中…").font(.caption2).foregroundStyle(.tertiary)
             }
+            if let until = entry.subscriptionActiveUntil {
+                Label(ResetFormatter.subscriptionExpiry(until), systemImage: "calendar.badge.clock")
+                    .font(.caption2)
+                    .foregroundStyle(entry.isSubscriptionExpiringSoon ? Color.orange : Color.secondary)
+            }
             if entry.needsLogin || !entry.isActive {
                 HStack {
                     if entry.needsLogin {

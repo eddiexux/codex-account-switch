@@ -290,4 +290,16 @@ enum ResetFormatter {
     }()
 
     static func absolute(_ date: Date) -> String { absoluteFormatter.string(from: date) }
+
+    /// 会员到期时间的简短描述，用于菜单行和侧边栏。
+    /// - 7 天内：显示剩余天数，方便及时续费
+    /// - 超过 7 天：显示月日，不占过多空间
+    static func subscriptionExpiry(_ date: Date) -> String {
+        let seconds = date.timeIntervalSinceNow
+        if seconds <= 0 { return "会员已到期" }
+        let days = Int(seconds / 86_400)
+        if days == 0 { return "会员今天到期" }
+        if days <= 7 { return "\(days) 天后到期" }
+        return "会员 \(absoluteFormatter.string(from: date)) 到期"
+    }
 }

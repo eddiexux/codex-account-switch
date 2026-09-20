@@ -32,6 +32,15 @@ struct AccountEntry: Identifiable {
     }
 
     var canRedeemResetCredit: Bool { availableResetCredits > 0 && !needsLogin }
+
+    /// id_token 里解析到的 ChatGPT 会员到期时间；没有此字段时为 nil。
+    var subscriptionActiveUntil: Date? { snapshot.subscriptionActiveUntil }
+
+    /// 会员是否在 7 天内到期（日期未知时返回 false）。
+    var isSubscriptionExpiringSoon: Bool {
+        guard let until = subscriptionActiveUntil else { return false }
+        return until.timeIntervalSinceNow < 7 * 86_400
+    }
 }
 
 @MainActor

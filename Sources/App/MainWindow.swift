@@ -193,6 +193,11 @@ struct SidebarRow: View {
                     Text("需重新登录").font(.caption2).foregroundStyle(.orange)
                 }
             }
+            if let until = entry.subscriptionActiveUntil {
+                Text(ResetFormatter.subscriptionExpiry(until))
+                    .font(.caption2)
+                    .foregroundStyle(entry.isSubscriptionExpiringSoon ? Color.orange : Color.secondary)
+            }
         }
         .padding(.vertical, 3)
     }
@@ -284,6 +289,11 @@ struct AccountDetailView: View {
                     Text(entry.planLabel).font(.caption).foregroundStyle(.secondary)
                     StatusBadge(entry: entry)
                     Text("ID \(entry.id.prefix(8))…").font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                }
+                if let until = entry.subscriptionActiveUntil {
+                    Label(ResetFormatter.subscriptionExpiry(until), systemImage: "calendar.badge.clock")
+                        .font(.caption)
+                        .foregroundStyle(entry.isSubscriptionExpiringSoon ? Color.orange : Color.secondary)
                 }
             }
             Spacer()
