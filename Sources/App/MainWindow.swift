@@ -43,6 +43,7 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         preview.styleMask = [.titled, .closable]
         preview.isReleasedWhenClosed = false
         preview.center()
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         preview.makeKeyAndOrderFront(nil)
     }
@@ -53,7 +54,11 @@ struct MainWindowView: View {
 
     private var selection: Binding<String?> {
         Binding(
-            get: { state.showsOverview ? AppState.overviewSelectionId : state.selectedEntry?.id },
+            get: {
+                if state.showsSessions { return AppState.sessionsSelectionId }
+                if state.showsOverview { return AppState.overviewSelectionId }
+                return state.selectedEntry?.id
+            },
             set: { state.selectedAccountId = $0 }
         )
     }
@@ -63,7 +68,9 @@ struct MainWindowView: View {
             sidebar
                 .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 360)
         } detail: {
-            if state.showsOverview {
+            if state.showsSessions {
+                ActiveSessionsView(state: state)
+            } else if state.showsOverview {
                 OverviewView(state: state)
             } else if let entry = state.selectedEntry {
                 AccountDetailView(state: state, entry: entry)
@@ -74,6 +81,7 @@ struct MainWindowView: View {
         }
         .frame(minWidth: 760, minHeight: 480)
         .onAppear {
+            Task { await state.refreshCodexSessions() }
             if let last = state.lastRefreshAt, Date().timeIntervalSince(last) < 60 { return }
             Task { await state.refreshUsage() }
         }
@@ -82,6 +90,10 @@ struct MainWindowView: View {
     private var sidebar: some View {
         VStack(spacing: 0) {
             List(selection: selection) {
+                if !state.activeSessions.isEmpty {
+                    ActiveSessionsSidebarRow(sessions: state.activeSessions)
+                        .tag(AppState.sessionsSelectionId)
+                }
                 if state.entries.count >= 2 {
                     OverviewSidebarRow(pool: state.combinedPace).tag(AppState.overviewSelectionId)
                 }
@@ -115,8 +127,15 @@ struct MainWindowView: View {
                 }
                 .disabled(state.isBusy)
                 Toggle("开机自启", isOn: $state.launchAtLogin).toggleStyle(.checkbox).font(.caption)
-                if state.codexProcessCount > 0 {
-                    Label("\(state.codexProcessCount) 个 Codex 进程运行中，切换只对新会话生效", systemImage: "info.circle")
+                if !state.activeSessions.isEmpty {
+                    Button {
+                        state.selectedAccountId = AppState.sessionsSelectionId
+                    } label: {
+                        Label("\(state.activeSessions.count) 个活跃会话，切换只对新会话生效", systemImage: "bubble.left.and.bubble.right")
+                    }
+                    .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
+                } else if state.codexProcessCount > 0 {
+                    Label("\(state.codexProcessCount) 个 Codex 进程运行中", systemImage: "info.circle")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }

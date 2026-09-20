@@ -9,6 +9,7 @@ macOS 菜单栏小工具：展示多个 ChatGPT 账号在 Codex 里的额度与�
 - 右上角菜单栏显示当前账号的周额度已用百分比
 - 菜单面板（精简版）：每个账号一行，含邮箱、套餐、周额度条与重置时间、重置卡张数角标；「切换到此账号」把目标账号的登录态写入 `auth.json`
 - 详情窗口（菜单右上角的窗口图标、双击账号行或点重置卡角标打开）：左侧账号列表，右侧完整信息——全部额度窗口、每周节奏与速度预测、按模型单独计量的额度（如 GPT-5.3-Codex-Spark）、重置卡明细与兑换、最近 7 天用量曲线
+- 活跃会话：菜单面板展示当前会话的账号与内容摘要，详情窗口列出创建/更新时间、标题、最近请求、工作目录和 PID；切换账号后仍能看出旧会话继续使用哪个账号
 - 全局节奏（有两个及以上账号时）：菜单面板顶部一行「全部账号合计」，详情窗口侧边栏顶部「全部账号」总览页。把各账号的周窗合成一个池子看：合计已用 / 计划基准 / 差距 / 剩余，合计消耗速度与「早于最早重置就耗尽」预警，要让每个账号都撑到各自重置的每天合计上限，逐账号并排对比表，按时间排序的重置时间线（每次重置回补多少、池子回到多少），以及各账号叠放的 7 天用量曲线。口径是每个账号的周额度按 100% 等权，套餐不同时绝对额度并不相同
 - 重置卡（rate limit reset credit）：OpenAI 不定期赠送，兑换后把已达上限的额度窗口清零。窗口里显示每张卡的过期时间，「使用一张重置卡」二次确认后优先消耗最早过期的那张（与 codex-lb 一致）；当前没有窗口达上限时服务端会返回「无需重置」并保留卡片
 - 「添加账号…」/「重新登录…」：运行 `codex login --device-auth`，面板里直接显示登录链接和一次性代码，复制到任意浏览器（换账号可用隐私窗口）完成授权后自动入库；不自动弹浏览器，不占本机回调端口
@@ -34,17 +35,20 @@ scripts/build-app.sh --install   # 构建、打包、安装到 ~/Applications �
 - 账号身份来自 `auth.json` 里 `id_token` 的 `email` / `chatgpt_plan_type` 声明（仅解码，不校验签名，不用于鉴权）
 - 额度来自 `GET https://chatgpt.com/backend-api/wham/usage`，与 Codex CLI `/status` 同源；其中 `rate_limit_reset_credits.available_count` 是重置卡张数，`applicable_available_count` 表示此刻是否有窗口可被清零
 - 重置卡明细与兑换走 `GET/POST https://chatgpt.com/backend-api/wham/rate-limit-reset-credits[/consume]`，与 Codex TUI 的「Redeem usage limit reset」和 codex-lb 同一接口；兑换请求带随机 `redeem_request_id`，不幂等、失败不重试
+- 活跃会话以 `thread-writer-locks` 的实际进程持有者为准，标题、时间和最近请求通过本机 Codex app-server 的只读协议获取；不会向会话发送消息或控制进程
 
 账号快照存放在 `~/Library/Application Support/CodexAccountSwitch/accounts/<account_id>.json`，目录 0700、文件 0600，内容就是对应账号完整的 `auth.json` 原始字节。
+新会话首次被观察到时，其账号映射写入同目录的 `session-accounts.json`；只保存 `session_id`、`account_id` 和观察时间，不保存消息或令牌。
 
-四条不变量：
+五条不变量：
 
 1. **live 优先回写。** Codex 每次续期都会轮换 refresh token，旧副本一旦复用会被 OpenAI 永久拒绝。因此任何切换或登录前，工具都先把当前 `auth.json` 回写到它所属账号的槽位，再写入目标账号。
 2. **活跃账号的令牌只由 Codex 维护。** 工具只为待机账号续期（访问令牌距过期不足 24 小时或收到 401 时），续期结果写回槽位；绝不替活跃账号刷新，避免与 Codex 进程竞争同一条 refresh token 链。
 3. **登录前先清空 live。** `codex login` 开始时会对现有 `auth.json` 执行 `logout_with_revoke`，在服务端作废当前账号的令牌（返回 `refresh_token_invalidated`）。工具在运行它之前先把当前账号回写到槽位、再删除 `auth.json`，登录流程就无东西可撤销；登录失败或被中断时自动从槽位恢复上一账号。**不要在工具之外手动运行 `codex login`**，否则当前账号会被作废。
 4. **原子写入。** 写 `auth.json` 与槽位文件都走同目录临时文件 + `rename`，Codex 任何时刻读到的都是完整文件。
+5. **会话归属不猜测。** 新会话按创建时的活跃账号确认且之后不重绑；功能上线前已存在的会话只在额度窗口唯一匹配时标记账号，否则明确显示「账号未知」。
 
-已在运行的 Codex 进程（ChatGPT 桌面端内置 app-server、Paseo、终端 TUI）在内存里持有旧账号令牌。Codex 自身在刷新前会重读 `auth.json` 并比对 account_id，不一致就跳过刷新，所以旧进程不会把新账号覆盖回去；但它们也不会自动换到新账号，**切换只对新会话生效**。面板底部会显示当前运行的 Codex 进程数作为提示。
+已在运行的 Codex 进程（ChatGPT 桌面端内置 app-server、Paseo、终端 TUI）在内存里持有旧账号令牌。Codex 自身在刷新前会重读 `auth.json` 并比对 account_id，不一致就跳过刷新，所以旧进程不会把新账号覆盖回去；但它们也不会自动换到新账号，**切换只对新会话生效**。面板会列出仍由存活进程持有的活跃会话及其账号归属。
 
 ## 与 codex-lb 的关系
 
@@ -64,6 +68,7 @@ swift run selftest     # 契约自测（Command Line Tools 没有 XCTest）
 .build/debug/CodexAccountSwitch   # 直接运行（无 .app 包时"开机自启"不可用）
 CAS_OPEN=window .build/debug/CodexAccountSwitch   # 启动即打开详情窗口，便于截图核对
 CAS_OPEN=overview .build/debug/CodexAccountSwitch # 启动即打开详情窗口并定位到「全部账号」总览页
+CAS_OPEN=sessions .build/debug/CodexAccountSwitch # 启动即打开详情窗口并定位到「活跃会话」页
 CAS_OPEN=menu .build/debug/CodexAccountSwitch     # 用普通窗口预览菜单面板（菜单栏弹窗无法脚本化打开）
 scripts/build-app.sh   # 打包到 build/
 scripts/make-icon.sh   # 改过 Resources/AppIcon.svg 后重新生成 AppIcon.icns（需 brew install librsvg）

@@ -43,6 +43,21 @@ struct AccountEntry: Identifiable {
     }
 }
 
+enum SessionAccountEvidence: Equatable {
+    case observed
+    case usageMatch
+    case unknown
+}
+
+struct ActiveSessionEntry: Identifiable, Equatable {
+    let session: CodexSession
+    let accountId: String?
+    let accountLabel: String
+    let evidence: SessionAccountEvidence
+
+    var id: String { session.id }
+}
+
 @MainActor
 @Observable
 final class AppState {
@@ -52,6 +67,8 @@ final class AppState {
     private(set) var busyMessage: String?
     private(set) var lastRefreshAt: Date?
     private(set) var codexProcessCount = 0
+    private(set) var activeSessions: [ActiveSessionEntry] = []
+    private(set) var isRefreshingSessions = false
     /// 设备码登录进行中时的链接与一次性代码，面板据此展示。
     private(set) var loginPrompt: LoginSession.Prompt?
     private var loginSession: LoginSession?
@@ -66,10 +83,13 @@ final class AppState {
 
     private let store = AccountStore()
     private let history = UsageHistoryStore()
+    private let sessionAccounts = CodexSessionAccountStore()
     private var timer: Timer?
     private var usageCache: [String: UsageSnapshot] = [:]
     private var resetCreditCache: [String: ResetCreditList] = [:]
     private var needsLoginCache: Set<String> = []
+    /// 启动时已经存在的会话只作为基线，不直接绑定当前账号；之后新出现的会话才可确定归属。
+    private var observedSessionIds: Set<String> = []
 
     nonisolated static let refreshInterval: TimeInterval = 5 * 60
     /// 待机账号的访问令牌距过期不足 24 小时就提前续期，避免在界面上显示过期数据。
@@ -77,6 +97,7 @@ final class AppState {
 
     init() {
         reloadEntries()
+        observedSessionIds = Set(CodexProcess.activeThreads(codexHome: store.codexHome).map(\.id))
         timer = Timer.scheduledTimer(withTimeInterval: Self.refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refreshUsage() }
         }
@@ -87,7 +108,9 @@ final class AppState {
 
     /// 详情窗口侧边栏"全部账号"总览页的选中标识，与真实 account_id 不会冲突。
     nonisolated static let overviewSelectionId = "__overview__"
+    nonisolated static let sessionsSelectionId = "__sessions__"
     var showsOverview: Bool { selectedAccountId == Self.overviewSelectionId }
+    var showsSessions: Bool { selectedAccountId == Self.sessionsSelectionId }
 
     /// 全局节奏：所有拿到周节奏的账号合成一个池子；需重新登录或额度未加载的账号计入 excludedCount。
     var combinedPace: CombinedPace? {
@@ -205,6 +228,72 @@ final class AppState {
             }
         }
         lastRefreshAt = Date()
+        await refreshCodexSessions()
+    }
+
+    /// 刷新活跃会话独立于额度请求；失败时至少保留会话 ID/PID，不影响账号切换。
+    func refreshCodexSessions() async {
+        guard !isRefreshingSessions else { return }
+        isRefreshingSessions = true
+        defer { isRefreshingSessions = false }
+
+        let codexHome = store.codexHome
+        let executable = CodexProcess.executable()
+        let threads = await Task.detached {
+            CodexProcess.activeThreads(codexHome: codexHome)
+        }.value
+        captureNewSessions(threads, accountId: activeEntry?.id)
+        let sessions = await CodexSessionReader.read(
+            activeThreads: threads, executable: executable, codexHome: codexHome
+        )
+        activeSessions = sessions.map(resolveAccount)
+        codexProcessCount = CodexProcess.runningCount()
+    }
+
+    private func captureNewSessions(_ threads: [ActiveCodexThread], accountId: String?) {
+        let ids = Set(threads.map(\.id))
+        let newlyObserved = ids.subtracting(observedSessionIds)
+        if let accountId { sessionAccounts.bindIfAbsent(sessionIds: newlyObserved, accountId: accountId) }
+        observedSessionIds.formUnion(ids)
+    }
+
+    private func resolveAccount(for session: CodexSession) -> ActiveSessionEntry {
+        if let binding = sessionAccounts.binding(for: session.id) {
+            return ActiveSessionEntry(
+                session: session,
+                accountId: binding.accountId,
+                accountLabel: accountLabel(binding.accountId),
+                evidence: .observed
+            )
+        }
+        if let accountId = uniqueUsageMatch(for: session.rateLimitFingerprint) {
+            return ActiveSessionEntry(
+                session: session,
+                accountId: accountId,
+                accountLabel: accountLabel(accountId),
+                evidence: .usageMatch
+            )
+        }
+        return ActiveSessionEntry(
+            session: session, accountId: nil, accountLabel: "账号未知", evidence: .unknown
+        )
+    }
+
+    private func accountLabel(_ accountId: String) -> String {
+        entries.first(where: { $0.id == accountId })?.email ?? "\(accountId.prefix(8))…"
+    }
+
+    /// 只接受唯一匹配。窗口时长和 resetAt 同时相同最强；7 天历史采样只用于补足刚好刷新失败的账号。
+    private func uniqueUsageMatch(for fingerprint: CodexRateLimitFingerprint?) -> String? {
+        let evidence = entries.map { entry in
+            CodexAccountUsageEvidence(
+                accountId: entry.id,
+                planType: entry.usage?.planType ?? entry.snapshot.planType,
+                currentWindows: entry.usage?.windows ?? [],
+                historicalWeeklyResetDates: history.samples(for: entry.id).compactMap(\.resetAt)
+            )
+        }
+        return CodexSessionAccountMatcher.uniqueAccountId(fingerprint: fingerprint, accounts: evidence)
     }
 
     private func pace(accountId: String, usage: UsageSnapshot?) -> WeeklyPace? {
@@ -271,6 +360,8 @@ final class AppState {
         isBusy = true
         busyMessage = "正在切换到 \(target.email)…"
         defer { isBusy = false; busyMessage = nil }
+        // 在 auth.json 改变前冻结刚出现会话的账号归属；已有映射 first-writer-wins。
+        captureNewSessions(CodexProcess.activeThreads(codexHome: store.codexHome), accountId: activeEntry?.id)
         AppLog.write("切换：\(activeEntry?.email ?? "无") → \(target.email)")
         do {
             try store.activate(accountId: accountId)
@@ -332,6 +423,7 @@ final class AppState {
         do {
             executable = try CodexProcess.requireExecutable()
             previous = try store.syncLiveIntoSlot()
+            captureNewSessions(CodexProcess.activeThreads(codexHome: store.codexHome), accountId: previous?.accountId)
             try store.removeLive()
         } catch {
             statusMessage = "登录前准备失败，已取消：\(error.localizedDescription)"

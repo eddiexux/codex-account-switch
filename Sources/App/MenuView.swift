@@ -32,6 +32,11 @@ struct MenuView: View {
             if let prompt = state.loginPrompt {
                 LoginPromptBox(prompt: prompt) { state.cancelLogin() }
             }
+            if !state.activeSessions.isEmpty {
+                CompactSessionList(sessions: state.activeSessions) {
+                    MainWindowController.shared.show(state: state, selecting: AppState.sessionsSelectionId)
+                }
+            }
             ActivityFooter(state: state)
             Divider()
             footer
@@ -39,6 +44,7 @@ struct MenuView: View {
         .padding(12)
         .frame(width: 340)
         .onAppear {
+            Task { await state.refreshCodexSessions() }
             if let last = state.lastRefreshAt, Date().timeIntervalSince(last) < 60 { return }
             Task { await state.refreshUsage() }
         }
@@ -83,12 +89,9 @@ struct MenuView: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if state.codexProcessCount > 0 {
-                Label(
-                    "\(state.codexProcessCount) 个 Codex 进程运行中，切换只对新会话生效",
-                    systemImage: "info.circle"
-                )
-                .font(.caption).foregroundStyle(.secondary)
+            if state.activeSessions.isEmpty, state.codexProcessCount > 0 {
+                Label("\(state.codexProcessCount) 个 Codex 进程运行中", systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             HStack {
                 Button("添加账号…") { Task { await state.loginViaCodex() } }

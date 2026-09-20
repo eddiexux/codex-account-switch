@@ -478,6 +478,106 @@ final class ResetCreditTests: XCTestCase {
     }
 }
 
+final class CodexSessionTests: XCTestCase {
+    func testParsesOnlyLiveCodexLockHolders() throws {
+        let a = "01a0bc9c-8892-7580-9ba4-1a5f5ff347f9"
+        let b = "01a0b044-bc19-71f0-8804-68b94755882d"
+        let output = """
+        p84046
+        ccodex
+        f36
+        n/Users/me/.codex/thread-writer-locks/\(a).lock
+        p84047
+        ccodex-hud
+        f12
+        n/Users/me/.codex/thread-writer-locks/\(b).lock
+        p94690
+        ccodex
+        f28
+        n/Users/me/.codex/thread-writer-locks/\(b).lock
+        f29
+        n/Users/me/.codex/thread-writer-locks/not-a-session.lock
+        """
+        let parsed = CodexProcess.parseActiveThreads(output)
+        XCTAssertEqual(parsed, [
+            ActiveCodexThread(id: a, processId: 84046),
+            ActiveCodexThread(id: b, processId: 94690),
+        ])
+    }
+
+    func testExtractsLatestRateLimitFromFileTail() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cas-session-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let event: [String: Any] = [
+            "type": "event_msg",
+            "payload": [
+                "type": "token_count",
+                "rate_limits": [
+                    "plan_type": "pro",
+                    "primary": ["used_percent": 87, "window_minutes": 10_080, "resets_at": 1_790_259_637],
+                    "secondary": NSNull(),
+                ],
+            ],
+        ]
+        let eventData = try JSONSerialization.data(withJSONObject: event)
+        var data = eventData
+        data.append(0x0A)
+        data.append(Data("{\"type\":\"response_item\",\"padding\":\"\(String(repeating: "x", count: 90_000))\"}\n".utf8))
+        try data.write(to: url)
+
+        let fingerprint = try XCTUnwrap(CodexSessionReader.latestRateLimitFingerprint(in: url))
+        XCTAssertEqual(fingerprint.planType, "pro")
+        XCTAssertEqual(fingerprint.windows.count, 1)
+        XCTAssertEqual(fingerprint.windows[0].windowSeconds, 604_800)
+        XCTAssertEqual(fingerprint.windows[0].resetAt, Date(timeIntervalSince1970: 1_790_259_637), accuracy: 0.01)
+    }
+
+    func testAccountStoreNeverRebindsConfirmedSession() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cas-session-accounts-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = CodexSessionAccountStore(fileURL: url)
+        store.bindIfAbsent(sessionIds: ["session-a"], accountId: "account-1", at: Date(timeIntervalSince1970: 100))
+        store.bindIfAbsent(sessionIds: ["session-a"], accountId: "account-2", at: Date(timeIntervalSince1970: 200))
+        XCTAssertEqual(store.binding(for: "session-a")?.accountId, "account-1")
+        XCTAssertEqual(CodexSessionAccountStore(fileURL: url).binding(for: "session-a")?.accountId, "account-1")
+    }
+
+    func testUsageFingerprintRequiresUniqueAccount() throws {
+        let reset = Date(timeIntervalSince1970: 1_790_259_637)
+        let fingerprint = CodexRateLimitFingerprint(
+            planType: "pro",
+            windows: [CodexRateLimitWindow(windowSeconds: 604_800, resetAt: reset)]
+        )
+        let a = CodexAccountUsageEvidence(
+            accountId: "A", planType: "pro",
+            currentWindows: [UsageWindow(usedPercent: 80, windowSeconds: 604_800, resetAt: reset)],
+            historicalWeeklyResetDates: []
+        )
+        let b = CodexAccountUsageEvidence(
+            accountId: "B", planType: "pro",
+            currentWindows: [UsageWindow(usedPercent: 5, windowSeconds: 604_800, resetAt: reset.addingTimeInterval(86_400))],
+            historicalWeeklyResetDates: []
+        )
+        XCTAssertEqual(CodexSessionAccountMatcher.uniqueAccountId(fingerprint: fingerprint, accounts: [a, b]), "A")
+
+        let ambiguousB = CodexAccountUsageEvidence(
+            accountId: "B", planType: "pro", currentWindows: [], historicalWeeklyResetDates: [reset]
+        )
+        XCTAssertNil(
+            CodexSessionAccountMatcher.uniqueAccountId(fingerprint: fingerprint, accounts: [a, ambiguousB]),
+            "重置时间同时命中两个账号时必须显示未知"
+        )
+    }
+
+    func testTitleUsesFirstNonEmptyLineAndCapsLength() throws {
+        XCTAssertEqual(CodexSessionReader.cleanTitle("\n  第一行标题  \n第二行"), "第一行标题")
+        XCTAssertEqual(CodexSessionReader.cleanTitle(String(repeating: "x", count: 200))?.count, 120)
+        XCTAssertNil(CodexSessionReader.cleanTitle(" \n \t"))
+    }
+}
+
 enum TestAuth {
     static func jwt(_ claims: [String: Any]) -> String {
         let payload = try! JSONSerialization.data(withJSONObject: claims)
@@ -559,6 +659,13 @@ run(ResetCreditTests.self, [
     ("testMissingCountFallsBackToCountingAvailableStatuses", { try $0.testMissingCountFallsBackToCountingAvailableStatuses() }),
     ("testConsumeOutcomeCodes", { try $0.testConsumeOutcomeCodes() }),
     ("testUsageSnapshotParsesResetCreditSummaryAndAdditionalLimits", { try $0.testUsageSnapshotParsesResetCreditSummaryAndAdditionalLimits() }),
+])
+run(CodexSessionTests.self, [
+    ("testParsesOnlyLiveCodexLockHolders", { try $0.testParsesOnlyLiveCodexLockHolders() }),
+    ("testExtractsLatestRateLimitFromFileTail", { try $0.testExtractsLatestRateLimitFromFileTail() }),
+    ("testAccountStoreNeverRebindsConfirmedSession", { try $0.testAccountStoreNeverRebindsConfirmedSession() }),
+    ("testUsageFingerprintRequiresUniqueAccount", { try $0.testUsageFingerprintRequiresUniqueAccount() }),
+    ("testTitleUsesFirstNonEmptyLineAndCapsLength", { try $0.testTitleUsesFirstNonEmptyLineAndCapsLength() }),
 ])
 print("\n\(passed) assertions passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
